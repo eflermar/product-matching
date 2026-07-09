@@ -1,0 +1,288 @@
+= Competition 2026
+
+== Cross-Geo Product Matching and Grouping Challenge
+
+This year's competition focuses on identifying identical products across different listings and geographical markets.
+
+Participants must develop models capable of recognizing when multiple items correspond to the same underlying product, even if their:
+
+* titles differ,
+* descriptions vary,
+* prices differ,
+* images differ slightly,
+* metadata differs across geographies.
+
+The dataset consists of real-world product data provided by Glami, a leading fashion search engine operating across multiple European markets.
+
+The challenge consists of two phases:
+
+* *Phase 1* -- Duplicate detection within predefined groups
+* *Phase 2* -- Product grouping with confidence estimation
+
+The goal is to combine multimodal signals such as text, image, price, and categorical metadata to perform robust duplicate detection under real-world noise.
+
+'''
+
+== Dataset
+
+The competition uses real-world product listing data provided by Glami.
+
+=== Files Provided
+
+Participants will receive:
+
+* link:data/items_train.csv[`items_train.csv`] (~900k items with labels)
+* link:data/items_phase_1.csv[`items_phase_1.csv`] (~200k items without labels)
+* link:data/items_phase_2.csv[`items_phase_2.csv`] (~200k items without labels, released in Phase 2)
+* link:data/task_1.csv[`task_1.csv`] (15,000 predefined groups of 5 items)
+* link:https://filesender.cesnet.cz/?s=download&token=5580a158-8c50-4702-aa95-6620822fe28e[`glami_images.tar.gz`] (images for all items -- distributed separately, link valid until 2026-05-24)
+
+=== Available Features Per Item
+
+Each item contains:
+
+* title
+* description
+* geo
+* price
+* image
+* department IDs
+* color tag IDs
+* label (hidden during competition except in the training set)
+
+=== Total Statistics
+
+* ~1.3M total items
+* 217k distinct product labels
+
+'''
+
+== Competition Structure
+
+== Phase 1 -- Duplicate Detection Within Groups
+
+=== Task Description
+
+You are given *15,000 predefined groups*, each containing *5 items*.
+
+The groups are generated from `items_phase_1.csv`. Items may appear in multiple groups.
+
+A *positive group* contains at least two items that share the same product label.
+
+A *negative group* contains five different products.
+
+Positive groups may contain:
+
+* 2 identical items
+* 3 identical items
+* 4 identical items
+* 5 identical items
+
+=== Your Task
+
+For each group, predict whether it contains at least one duplicate pair.
+
+Let `z_g = 1` denote that the group contains at least one pair of items with the same label, and `z_g = 0` otherwise.
+
+Your task is to predict `z_g` for all groups.
+
+=== Phase 1 Evaluation
+
+We evaluate binary classification performance across all 15,000 groups.
+
+*Precision* = TP / (TP + FP)
+
+*Recall* = TP / (TP + FN)
+
+*F1* = 2 * Precision * Recall / (Precision + Recall)
+
+Where:
+
+* TP -- correctly predicted positive groups
+* FP -- incorrectly predicted positive groups
+* FN -- missed positive groups
+
+=== Tie-breaking
+
+If multiple participants obtain the same F1 score:
+
+. Higher Recall wins
+. If still tied, Higher Precision wins
+
+'''
+
+== Phase 2 -- Product Grouping
+
+=== Task Description
+
+Using all items from `items_phase_2.csv`, your task is to solve an end-to-end entity matching problem. You must construct disjoint product groups, where each group represents a single, distinct underlying product. 
+
+=== Submission Format
+
+Your solution must be handed over as a simple text/CSV file where **each line represents one product group**. 
+
+* The line must contain comma-separated `item_id`s.
+* An item can only appear in **one** group (hard clustering).
+* **Constraint:** There cannot be more than **100 items** in a single group (i.e., on one line). If a line exceeds 100 items, the submission will be rejected.
+
+*Example Submission File:*
+----
+```
+item_1,item_2,item_5
+item_3
+item_4,item_7
+item_6,item_8,item_9,item_10
+```
+----
+*(Note: Singletons—items that do not match with anything else—should be placed on their own line).*
+
+'''
+
+=== Evaluation Metric: Pairwise F1 Score
+
+To evaluate the quality of your product groups, we will use the **F1 score** of pairwise comparisons between your groups and the ground truth. 
+
+To solve this, we evaluate your clusters by treating them as a **full adjacency matrix of edges** between items, and we compute the **F1 score of these pairwise links**.
+
+==== How it works:
+Imagine a matrix where every item is compared to every other item. 
+An edge (link) exists between two items if they are placed in the *same group*.
+
+We define the components as follows:
+* **True Positives (TP):** A pair of items are in the same group in the Ground Truth AND in your Prediction.
+* **False Positives (FP):** A pair of items are in different groups in the Ground Truth, BUT you put them in the same group (Over-merging).
+* **False Negatives (FN):** A pair of items are in the same group in the Ground Truth, BUT you put them in different groups (Split clusters).
+
+*Precision* = TP / (TP + FP)
+*Recall* = TP / (TP + FN)
+*F1* = 2 * Precision * Recall / (Precision + Recall)
+
+==== Visualization & Toy Example
+
+Let's say we have 5 items in the dataset: `A, B, C, D, E`
+
+**1. Ground Truth (Real Products)**
+The true identical products are:
+* Group 1: `A, B, C`
+* Group 2: `D, E`
+
+This creates **4 True Edges** in our adjacency matrix:
+`(A-B), (A-C), (B-C), (D-E)`
+
+**2. Your Prediction**
+Your model outputs the following groups:
+* Predicted Group 1: `A, B`
+* Predicted Group 2: `C, D, E`
+
+This creates **4 Predicted Edges**:
+`(A-B), (C-D), (C-E), (D-E)`
+
+**3. Metric Calculation**
+
+Let's cross-reference your predicted edges against the true edges:
+
+[cols="1,1,1", options="header"]
+|===
+| Edge Pair | Status | Reason
+| `(A-B)` | **TP** | Correctly grouped together
+| `(D-E)` | **TP** | Correctly grouped together
+| `(C-D)` | **FP** | You linked them, but they are different products
+| `(C-E)` | **FP** | You linked them, but they are different products
+| `(A-C)` | **FN** | You missed this true link (split group)
+| `(B-C)` | **FN** | You missed this true link (split group)
+|===
+
+**Final Score:**
+* **TP:** 2
+* **FP:** 2
+* **FN:** 2
+
+* **Precision:** 2 / (2 + 2) = **0.50**
+* **Recall:** 2 / (2 + 2) = **0.50**
+* **Pairwise F1:** 2 * (0.5 * 0.5) / (0.5 + 0.5) = **0.50**
+
+Submission
+
+The submission process will be split into two parts. In the first part, you will submit your predictions from the `items_phase_1.csv` and you will get a full score on this part. 
+In the second part, you will submit your predictions from the `items_phase_2.csv` where you will not be able to see the score
+that you achieved with your submission. This part will be used to sort the final leaderboard.
+
+== Grading
+
+Phase 1 submission:: 10 points
+* 3 points -- valid submission with a positive score
+* 7 points -- strategy presentation
+
+Phase 2 score:: 10 points
+
+Report:: 10 points
+
+Total:: 30 points
+
+'''
+
+== Important Dates
+
+|===
+<h|  Date <h| Events <h| Links
+| **March 3, 2026** | Competition announcement | link:GLAMI_FIT_Dataset.pdf[Presentation]
+| **March 10, 2026** | First batch release | link:data/items_train.csv[items_train.csv], link:data/items_phase_1.csv[items_phase_1.csv], link:data/task_1.csv[task_1.csv]
+| **March 19-31, 2026** | System subscription period | link:https://admcompetition.kam.fit.cvut.cz/competition26[System]
+| **March 23-31, 2026** | First round |  link:https://admcompetition.kam.fit.cvut.cz/competition26[System]
+| **March 31, April 14, 2026** | Progress presentations |  N/A
+| **April 16, 2026** | Second phase |  N/A
+| **May 19, 2026** | Competition end and report submission deadline |  https://admcompetition.kam.fit.cvut.cz/competition26[System]
+| **May 20, 2026** | Champions announcement |  N/A
+|===
+
+[NOTE]
+====
+Further details for Phase 2, including the exact evaluation metric and examples, will be announced later.
+====
+
+'''
+
+== Report
+
+Your report is a short *scientific paper* (max 4 pages, PDF, max 1 MB, max 1 table, max 2 figures). The goal is to learn how to clearly communicate a research contribution -- not just describe what you did.
+
+=== Start early, get feedback
+
+[TIP]
+====
+*Don't wait until the deadline.* Push your `report.pdf` to your repository as soon as you have an Introduction and Related Work draft. The Research Coach -- an LLM-assisted feedback tool I use to help review your writing -- will give you section-by-section comments you can iterate on.
+
+A recommended timeline:
+
+* **Now**: Register your project (see below) and push a draft with Introduction + Related Work
+* **After Phase 1 and Phase 2**: Incrementally add Methodology, Baselines, Experiments, Results, and Conclusion as your work progresses
+
+Submitting incremental drafts is encouraged -- the earlier you push, the more feedback rounds you get from me.
+====
+
+=== What makes a good report
+
+Your report should clearly answer three questions:
+
+. **What is your contribution?** What did you do differently or better?
+. **How does it compare to SOTA?** Position your work against the link:GLAMI_FIT_Dataset.pdf[Zalando cross-geo matching paper] and other relevant literature.
+. **Why is it better than simple baselines?** Show added value over naive approaches (exact title match, TF-IDF similarity, embedding cosine distance).
+
+=== Required sections
+
+. **Introduction** -- problem formulation, key challenges (multimodality, cross-geo variation, class imbalance)
+. **Related Work** -- relevant literature, discussion of the link:GLAMI_FIT_Dataset.pdf[Zalando paper] and its limitations, positioning of your approach
+. **Methodology** -- model design, features used, training procedure, confidence estimation (Phase 2)
+. **Baselines** -- at least one simple baseline with clear comparison to your method
+. **Experiments** -- validation strategy, hyperparameter selection, quantitative results
+. **Results** -- leaderboard score, strengths/weaknesses analysis, ablation study
+. **Conclusion** -- key findings, possible improvements
+
+=== How to submit
+
+. **Create a GitLab repository** for your project
+. **Register** at https://gitlab.fit.cvut.cz/kordikp/research-coach[Research Coach] -- click *New Issue*, use the *Registrace* template, enter your repo URL and *NI-ADM* as the course
+. **Push `report.pdf`** to your repository -- the system picks it up automatically
+. **Iterate** -- improve your report based on the feedback and push updated versions
+
+Report deadline: **May 16, 2026**.

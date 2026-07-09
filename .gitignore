@@ -1,0 +1,27 @@
+# Competition data (large, not redistributable)
+/data/
+
+# Generated embeddings, FAISS/feature caches (multi-GB, regenerable)
+*.h5
+cache_*.npz
+
+# Large generated XGBoost/model artifacts
+glami_xgb_*.json
+glami_group_meta_*.json
+
+# Fine-tuned model checkpoints (large binaries, regenerable via finetune_*.py)
+finetuned_text_model/
+finetuned_text_model_v2/
+finetuned_image_model/
+finetuned_image_model_v2/
+finetuned_crossencoder/
+
+# Generated submissions
+/submissions/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local Claude Code settings
+.claude/settings.local.json

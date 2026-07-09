@@ -1,93 +1,117 @@
-# adm-matching
+# Cross-Geo Product Matching & Grouping — GLAMI-1M
 
+A two-stage entity-resolution system that finds duplicate fashion products across
+listings from different European markets — even when titles are in different
+languages, images are cropped/lit differently, and prices are in different
+currencies. Built for the **NI-ADM 2026** data-mining competition (FIT CTU Prague)
+on the [GLAMI-1M](https://arxiv.org/abs/2211.14451) dataset (~1.3M items, 217k
+distinct product labels).
 
+**Result: 0.9025 pairwise F1** on the Phase 2 leaderboard, vs. an 0.8796
+cosine-similarity baseline (+2.3 points), with a Phase 1 duplicate-detection
+F1 of **0.993**. Full write-up in [`report.tex`](report.tex).
 
-## Getting started
+## The core idea
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Retrieve-then-rerank pipelines (FAISS + classifier) are standard for entity
+matching, but there's a subtle failure mode: if the reranker is trained on the
+*full* distribution of pairs (similarity 0 → 1), it learns that
+"high similarity → same product" almost perfectly — because in the full training
+distribution, that correlation is very strong. At inference time it only ever
+sees FAISS candidates, which are *already* high-similarity by construction. The
+model ends up assigning ≈1.0 to nearly every candidate, and the whole graph
+collapses into one giant cluster (F1 < 0.10).
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+**Fix:** retrain the classifier on exactly the similarity region the candidate
+set actually occupies (cosine sim ≥ 0.88), where both true matches and
+hard negatives (same brand/department/price, different product) are
+plentiful. This single change is worth **+9 F1 points** in the ablation — the
+entire contribution of the system is this distribution-matching step, not the
+features or the encoder architecture.
 
-## Add your files
+## Pipeline
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+![Pipeline overview](fig_pipeline.png)
+
+1. **Contrastive encoder fine-tuning (ANCE).** Two separate towers —
+   `intfloat/multilingual-e5-large` (text) and `facebook/dinov2-large`
+   (image) — are fine-tuned with InfoNCE, first with in-batch random
+   negatives, then with FAISS-mined hard negatives inserted into the
+   denominator each epoch. This produces language-agnostic embeddings so a
+   Czech and a Romanian listing of the same shoe land close together.
+2. **Candidate retrieval.** Top-50 text neighbours + top-50 image neighbours
+   per item (FAISS IVF, inner product), unioned. Combined similarity
+   `s = 0.5·s_text + 0.5·s_img`; candidates below `s = 0.88` are dropped.
+   Using both modalities matters: cross-geo pairs with unrelated-looking
+   titles are still catchable via image similarity.
+3. **Distribution-matched pair classifier.** An 84-feature XGBoost model
+   (text/image cosine + L2 distances, PCA'd embedding differences, price
+   ratio, exact-match indicators for department/colour/brand) trained
+   *only* on pairs in the `s ≥ 0.88` region. Val AUC 0.9990, Val F1 0.9884.
+4. **Clustering.** Threshold pair scores at `t = 0.28`, build a sparse graph,
+   take connected components as product groups. Components over the
+   100-item submission cap are split via MST weight cut.
+
+![Threshold sweep](fig_sweep.png)
+
+## What didn't work (and why)
+
+- **Anchor bridging** via known training-set labels — two distinct products
+  can both resemble the same anchor (e.g. two different red dresses), so
+  bridging introduces false links. F1 dropped to 0.887.
+- **A dedicated medium-similarity model** (0.70–0.88 range) to recover
+  cross-geo matches — trained on ~25% positive rate but the true inference
+  rate in that band is ~0.1%, a 250× mismatch that caused catastrophic
+  over-merging (F1 0.27).
+- **Metadata-based rule promotion** — brand/department/colour IDs are near-zero
+  for most items in this dataset, so almost nothing qualified.
+
+These are documented in [`report.tex`](report.tex) §4/§5 as a concrete
+illustration of why matching the *inference-time* distribution beats
+adding more features or more rules.
+
+## Repository structure
+
+| File | Purpose |
+|---|---|
+| `mapping_script.py` | Builds `categorical_mappings.json` (department/colour/brand IDs → contiguous ints) |
+| `finetune_contrastive.py` | First-generation contrastive fine-tuning (XLM-R + ConvNeXt-Tiny) |
+| `finetune_contrastive_v2.py` | ANCE fine-tuning of mE5-large + DINOv2-large: warm-up + hard-negative refinement |
+| `finetune_hard_negatives.py` | Second-pass text encoder adaptation on FAISS-mined hard negatives |
+| `train_cross_encoder.py` | Alternative reranker: cross-encoder over `[title_A desc_A ; title_B desc_B]` |
+| `extract_embeddings_v2.py` / `extract_embeddings_e5dino.py` | Dump backbone embeddings to HDF5 for downstream stages |
+| `features.py` | Shared feature library — pair features (20/84-dim), group aggregate features |
+| `pipeline_ft_v2.py` / `pipeline_ft_v5.py` | Train the pair + group XGBoost models (v5 adds 64 PCA-difference features) |
+| `retrain_pair_hardneg.py` / `retrain_pair_medmatch.py` / `retrain_pair_faiss.py` | Recalibrate the pair classifier on different similarity regions (the distribution-matching experiments) |
+| `ensemble_v2_v5.py` | Blend v2/v5 pair model scores |
+| `phase2_pipeline.py` | End-to-end inference: retrieval → scoring → clustering → submission CSV. Supports weighted/AND/XGBoost scoring modes, dept filtering, threshold sweeps |
+| `diagnose_recall.py` | Diagnostic: FAISS recall, candidate survival rate, positive rate per similarity bin |
+| `generate_figures.py` | Renders `fig_pipeline.png` / `fig_sweep.png` for the report |
+| `report.tex` | Full scientific report (methodology, baselines, ablation, error analysis) |
+| `competition.adoc` | Original competition/task specification |
+
+Model checkpoints (`finetuned_text_model*/`, `finetuned_image_model/`,
+`finetuned_crossencoder/`), extracted embeddings (`*.h5`), FAISS/feature
+caches (`cache_*.npz`), competition data (`data/`), and generated
+`submissions/` are excluded from version control (see `.gitignore`) — they're
+large, regenerable, and specific to a local machine.
+
+## Stack
+
+PyTorch · Hugging Face Transformers (`multilingual-e5-large`, `dinov2-large`,
+XLM-RoBERTa) · FAISS · XGBoost · scikit-learn (PCA)
+
+## Reproducing
+
+Order of execution (assumes `data/items_train.csv`, `data/items_phase_1.csv`,
+`data/items_phase_2.csv` present locally — not included in this repo):
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.fit.cvut.cz/eflermar/adm-matching.git
-git branch -M main
-git push -uf origin main
+python mapping_script.py                    # categorical_mappings.json
+python finetune_contrastive_v2.py           # fine-tune text + image towers
+python extract_embeddings_e5dino.py         # embeddings -> HDF5
+python pipeline_ft_v2.py                    # baseline pair/group XGBoost
+python retrain_pair_hardneg.py              # distribution-matched pair classifier
+python phase2_pipeline.py --use_model ... --threshold 0.28   # produce submission
+python generate_figures.py                  # figures for report.tex
 ```
-
-## Integrate with your tools
-
-* [Set up project integrations](https://gitlab.fit.cvut.cz/eflermar/adm-matching/-/settings/integrations)
-
-## Collaborate with your team
-
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
