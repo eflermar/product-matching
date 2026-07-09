@@ -5,11 +5,25 @@ listings from different European markets — even when titles are in different
 languages, images are cropped/lit differently, and prices are in different
 currencies. Built for the **NI-ADM 2026** data-mining competition (FIT CTU Prague)
 on the [GLAMI-1M](https://arxiv.org/abs/2211.14451) dataset (~1.3M items, 217k
-distinct product labels).
+distinct product labels), original spec in [`competition.adoc`](competition.adoc).
 
-**Result: 0.9025 pairwise F1** on the Phase 2 leaderboard, vs. an 0.8796
-cosine-similarity baseline (+2.3 points), with a Phase 1 duplicate-detection
-F1 of **0.993**. Full write-up in [`report.tex`](report.tex).
+## Task
+
+Glami listings for the same product diverge across markets in every available
+signal at once — title, description, price, image crop/lighting, and category
+metadata — so no single field is a reliable match key. The competition splits
+this into two differently-shaped problems:
+
+| Phase | Given | Task | Metric | This system |
+|---|---|---|---|---|
+| **1** | 15,000 predefined groups of 5 items (`items_phase_1.csv`) | Binary per group: does it contain **at least one** duplicate pair (`z_g`)? | Group-level F1 | **0.993** |
+| **2** | ~200k unlabeled items (`items_phase_2.csv`) | Partition *all* items into disjoint product groups, ≤100 items/group, hard clustering | Pairwise F1 — precision/recall over every same-group item pair vs. ground truth | **0.9025** (cosine-similarity baseline: 0.8796) |
+
+Phase 1 is closed-world duplicate detection (does *this* small group contain a
+match); Phase 2 is open-world clustering (partition ~200k items with no prior
+grouping at all) — the harder problem, and the one the final leaderboard is
+sorted by. The pipeline below is built for Phase 2; Phase 1 is solved as a
+by-product by scoring all `C(5,2)=10` pairs per group and thresholding.
 
 ## The core idea
 
@@ -69,6 +83,16 @@ features or the encoder architecture.
 These are documented in [`report.tex`](report.tex) §4/§5 as a concrete
 illustration of why matching the *inference-time* distribution beats
 adding more features or more rules.
+
+## Report
+
+[`report.tex`](report.tex) is the 4-page scientific paper required by the
+assignment: Introduction, Related Work, Methodology, Baselines, Experiments,
+Results, Conclusion. It positions the distribution-matching fix against
+Tóth et al.'s industry-scale Zalando cross-geo matching system (the assigned
+SOTA reference) — that paper doesn't train its reranker on the same
+similarity region its retrieval stage produces, which is exactly the failure
+mode (F1 < 0.10) this project's ablation isolates and fixes.
 
 ## Repository structure
 
